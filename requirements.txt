@@ -4,3 +4,4 @@ numpy
 PyMuPDF
 Pillow
 python-docx
+aiohttp
