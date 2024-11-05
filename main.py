@@ -13,6 +13,7 @@ import logging
 import tempfile
 import shutil
 from collections import defaultdict
+from aiohttp import web
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -267,8 +268,23 @@ temp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'temp')
 os.makedirs(temp_dir, exist_ok=True)
 tempfile.tempdir = temp_dir
 
+async def handle(request):
+    return web.Response(text="Bot is running")
+    
 async def main():
     logger.info("Bot started")
+    
+    # Создаем веб-приложение
+    app = web.Application()
+    app.router.add_get("/", handle)
+    
+    # Запускаем веб-сервер
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', 8080)
+    await site.start()
+    
+    # Запускаем бота
     await dp.start_polling(bot)
 
 if __name__ == '__main__':
