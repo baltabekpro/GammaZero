@@ -11,9 +11,7 @@ from aiogram.fsm.context import FSMContext
 import asyncio
 import logging
 import tempfile
-import shutil
 from collections import defaultdict
-from aiohttp import web
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -25,6 +23,9 @@ API_TOKEN = '7611578010:AAHt2uEA-nHSCcxqFebhyzCsvhqzHZr84tM'
 bot = Bot(token=API_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
+
+user_stats = defaultdict(lambda: {"username": None, "usage_count": 0})
+
 @dp.message(Command("start"))
 async def start_command(message: Message, state: FSMContext):
     welcome_text = (
@@ -36,17 +37,19 @@ async def start_command(message: Message, state: FSMContext):
         "🚀 Просто отправьте мне PDF файл, и я начну обработку!\n\n"
         "⚠️ Важно: размер файла не должен превышать 20MB"
     )
-    logger.info(f"Пользователь {message.from_user.id} запустил бота")
+    user_id = message.from_user.id
+    username = message.from_user.username
+    user_stats[user_id]["username"] = username  # Обновляем имя пользователя
+    user_stats[user_id]["usage_count"] += 1  # Увеличиваем счетчик использования
+    
+    logger.info(f"Пользователь {user_id} запустил бота")
     await message.reply(welcome_text)
     await state.set_state(Form.waiting_for_pdf)
-
-# Структура для хранения информации о пользователях
-user_stats = defaultdict(lambda: {"username": None, "usage_count": 0})
 
 def safe_remove(file_path):
     try:
         if os.path.exists(file_path):
-            os.chmod(file_path, 0o777)  # Даем все права на файл
+            os.chmod(file_path, 0o777)
             os.remove(file_path)
     except Exception as e:
         logger.error(f"Failed to remove temporary file {file_path}: {e}")
@@ -143,11 +146,7 @@ def process_pdf(input_path, output_path):
         return False
     finally:
         for temp_file in temp_files:
-            try:
-                if os.path.exists(temp_file):
-                    os.remove(temp_file)
-            except Exception as e:
-                logger.error(f"Failed to remove temporary file {temp_file}: {e}")
+            safe_remove(temp_file)
 
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
 MAX_CONCURRENT_PROCESSING = 3
@@ -182,59 +181,24 @@ async def handle_document(message: Message, state: FSMContext):
         
         logger.info(f"Начало обработки PDF для пользователя {user_id}")
         
-        with fitz.open(input_pdf_path) as doc, fitz.open() as output_doc:
-            total_pages = len(doc)
-            await status_message.edit_text(f"📄 Всего страниц: {total_pages}\n🔄 Обработка страницы 1/{total_pages}")
-            
-            for page_num, page in enumerate(doc):
-                if page_num % 2 == 0 or page_num == total_pages - 1:
-                    progress = "🔸" * ((page_num + 1) // (total_pages // 5 + 1)) + "⭕" * (5 - (page_num + 1) // (total_pages // 5 + 1))
-                    await status_message.edit_text(
-                        f"📄 Всего страниц: {total_pages}\n"
-                        f"🔄 Обработка страницы {page_num + 1}/{total_pages}\n"
-                        f"Прогресс: {progress}\n"
-                        f"⏳ Пожалуйста, подождите..."
-                    )
-                
-                logger.info(f"Обработка страницы {page_num + 1} для пользователя {user_id}")
-                pix = page.get_pixmap()
-                img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
-                processed_img = image_processor.process_image(img)
-                
-                img_rgb = cv2.cvtColor(processed_img, cv2.COLOR_BGR2RGB)
-                temp_png_path = f'temp_{user_id}_{page_num}.png'
-                cv2.imwrite(temp_png_path, img_rgb)
-                
-                try:
-                    new_page = output_doc.new_page(width=page.rect.width, height=page.rect.height)
-                    new_page.insert_image(new_page.rect, filename=temp_png_path)
-                finally:
-                    if os.path.exists(temp_png_path):
-                        os.remove(temp_png_path)
-
-            await status_message.edit_text("💾 Сохраняю результат...")
-            output_doc.save(output_pdf_path)
-
-        await status_message.edit_text("📤 Отправляю обработанный файл...")
-        doc_to_send = FSInputFile(output_pdf_path)
-        await message.reply_document(
-            doc_to_send,
-            caption="✅ Обработка завершена успешно!\n\nОтправьте новый PDF файл для обработки или /start для начала."
-        )
-        await status_message.edit_text("✅ Готово!")
+        if process_pdf(input_pdf_path, output_pdf_path):
+            await status_message.edit_text("📤 Отправляю обработанный файл...")
+            doc_to_send = FSInputFile(output_pdf_path)
+            await message.reply_document(
+                doc_to_send,
+                caption="✅ Обработка завершена успешно!\n\nОтправьте новый PDF файл для обработки или /start для начала."
+            )
+            await status_message.edit_text("✅ Готово!")
+        else:
+            await status_message.edit_text("❌ Произошла ошибка при обработке файла. Попробуйте еще раз.")
 
     except Exception as e:
-        error_message = f"❌ Произошла ошибка при обработке файла:\n{str(e)}\n\nПопробуйте отправить файл еще раз или используйте /start"
+        error_message = f"❌ Произошла ошибка при обработке файла:\n{str(e)}\n\nПопробуйте отправить файл еще раз или используйте /start для перезапуска."
         logger.error(f"Ошибка при обработке файла для пользователя {user_id}: {str(e)}")
         await status_message.edit_text(error_message)
     finally:
         for file_path in [input_pdf_path, output_pdf_path]:
-            try:
-                if os.path.exists(file_path):
-                    os.remove(file_path)
-                    logger.info(f"Временный файл удален: {file_path}")
-            except Exception as e:
-                logger.error(f"Ошибка при удалении временного файла: {str(e)}")
+            safe_remove(file_path)
 
         await state.clear()
         logger.info(f"Состояние очищено для пользователя {user_id}")
@@ -264,28 +228,5 @@ async def admin_command(message: Message):
     else:
         await message.reply("Доступ запрещен")
 
-temp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'temp')
-os.makedirs(temp_dir, exist_ok=True)
-tempfile.tempdir = temp_dir
-
-async def handle(request):
-    return web.Response(text="Bot is running")
-    
-async def main():
-    logger.info("Bot started")
-    
-    # Создаем веб-приложение
-    app = web.Application()
-    app.router.add_get("/", handle)
-    
-    # Запускаем веб-сервер
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', 8080)
-    await site.start()
-    
-    # Запускаем бота
-    await dp.start_polling(bot)
-
 if __name__ == '__main__':
-    asyncio.run(main())
+    asyncio.run(dp.start_polling(bot))
